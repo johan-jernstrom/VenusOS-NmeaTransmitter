@@ -17,7 +17,7 @@ def relay_dbus_value():
         current = battery_reader.get_batt_current()
         if current is not None:
             nmea_transmitter.send_nmea_sentence(value=current)
-            logging.info(f"Sent NMEA sentence with current value: {current}")
+            logging.debug(f"Sent NMEA sentence with current value: {current}")
         else:
             logging.error("Failed to read battery current from D-Bus.")
         return True  # Return True to keep the timer running
@@ -42,7 +42,7 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    logging.basicConfig(level=logging.DEBUG, format="%(asctime)-15s %(name)-8s %(levelname)s: %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)-15s %(name)-8s %(levelname)s: %(message)s")
     logging.info("Starting Dbus2Nmea0183 relay service...")
     # Have a mainloop, so we can send/receive asynchronous calls to and from dbus
     DBusGMainLoop(set_as_default=True)
