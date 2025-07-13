@@ -16,24 +16,8 @@ from datetime import datetime
 
 from Nmea0183Transmitter import Nmea0183Transmitter
 
-# Import victron packages
-sys.path.insert(1, os.path.join(os.path.dirname(__file__), '/opt/victronenergy/dbus-systemcalc-py/ext/velib_python'))
-try:
-    from dbusmonitor import DbusMonitor
-except ImportError:
-    # Fallback paths for different Venus OS versions
-    for path in ['/opt/victronenergy/dbus-systemcalc-py/ext/velib_python',
-                 '/opt/victronenergy/velib_python',
-                 '/usr/lib/python3/dist-packages']:
-        if path not in sys.path:
-            sys.path.insert(1, path)
-        try:
-            from dbusmonitor import DbusMonitor
-            break
-        except ImportError:
-            continue
-    else:
-        raise ImportError("Could not import DbusMonitor. Please check velib_python installation.")
+# Import victron packages, use locally downloaded copy of latest version of DbusMonitor that supports ignoreServices: https://github.com/victronenergy/velib_python/blob/master/dbusmonitor.py
+from velib_python.dbusmonitor import DbusMonitor
 
 # Import GLib for mainloop
 try:
@@ -47,8 +31,8 @@ except ImportError:
 class Dbus2NmeaRelayService:
     def __init__(self, min_relay_interval=0.5, max_relay_interval=60.0, log_level=logging.INFO):
         # Validate intervals
-        if min_relay_interval <= 0:
-            raise ValueError("min_relay_interval must be greater than 0")
+        if min_relay_interval <= 0.1:
+            raise ValueError("min_relay_interval must be greater than 0.1")
         if max_relay_interval <= min_relay_interval:
             raise ValueError("max_relay_interval must be greater than min_relay_interval")
             
@@ -68,10 +52,13 @@ class Dbus2NmeaRelayService:
         # Define what services and paths to monitor using DbusMonitor format
         # The structure is: {'service_class': {'/path': {'code': None, 'whenToLog': 'always'}}}
         self.monitor_list = {
-            'com.victronenergy.battery.ttyUSB1': {
+            'com.victronenergy.battery': {
                 '/Dc/0/Current': {'code': 'current', 'whenToLog': 'always'}
             }
         }
+
+        # Ignore the following service since we only want to monitor the 48v battery service connected to ttyUSB1
+        self.ignored_services = ['com.victronenergy.battery.ttyUSB0']
         
         # Cache for sensor data
         self.sensor_data = {}
@@ -99,7 +86,9 @@ class Dbus2NmeaRelayService:
                 dbusTree=self.monitor_list,
                 valueChangedCallback=self._on_value_changed,
                 deviceAddedCallback=self._on_device_added,
-                deviceRemovedCallback=self._on_device_removed
+                deviceRemovedCallback=self._on_device_removed,
+                namespace="com.victronenergy", 
+                ignoreServices=self.ignored_services
             )
             
             # Initialize sensor data cache with current values
@@ -149,10 +138,10 @@ class Dbus2NmeaRelayService:
                         'value': value,
                         'timestamp': current_time
                     }
+                    self.logger.debug(f"Initialized sensor {sensor_key} with value: {value}")
             
             self.data_changed = True
             self.logger.debug(f"Initialized sensor cache with {len(self.sensor_data)} sensors: {list(self.sensor_data.keys())}")
-
 
     def _on_device_added(self, service_name, device_instance):
         """Callback when a new device is added to the bus"""
