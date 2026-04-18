@@ -36,6 +36,11 @@ class Nmea0183Transmitter:
         checksum = self._calculate_checksum(body)
         return f"${body}*{checksum}\r\n"
 
+    def set_port(self, new_port):
+        """Switch to a different serial port; next send will reconnect."""
+        self.close()
+        self.serial_port = new_port
+
     def send_nmea_sentence(self, code="PSILTBS", value=None, unit="N"):
         """Send the NMEA sentence over serial port.
         Default code is 'PSILTBS' (Silva Nexus Special NMEA Sentence for Target Boat Speed) and unit is 'N' (Knot).

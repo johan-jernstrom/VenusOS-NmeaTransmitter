@@ -12,12 +12,14 @@ import logging
 import time
 import signal
 import threading
-from datetime import datetime
+import dbus
 
 from Nmea0183Transmitter import Nmea0183Transmitter
 
 # Import victron packages, use locally downloaded copy of latest version of DbusMonitor that supports ignoreServices: https://github.com/victronenergy/velib_python/blob/master/dbusmonitor.py
 from velib_python.dbusmonitor import DbusMonitor
+from velib_python.settingsdevice import SettingsDevice
+from velib_python.vedbus import VeDbusService
 
 # Import GLib for mainloop
 try:
@@ -49,16 +51,30 @@ class Dbus2NmeaRelayService:
             self.logger.error(f"Error initializing NMEA transmitter: {e}")
             raise
 
+        # Persistent settings stored in com.victronenergy.settings
+        self._settings = SettingsDevice(
+            bus=dbus.SystemBus(),
+            supportedSettings={
+                'SerialPort':     ['/Settings/NmeaTransmitter/SerialPort',     '/dev/ttyACM0',                           0, 0],
+                'BatteryService': ['/Settings/NmeaTransmitter/BatteryService', 'com.victronenergy.battery.ttyUSB1', 0, 0],
+            },
+            eventCallback=self._on_setting_changed
+        )
+
+        # Apply persisted serial port immediately
+        self.nmea_transmitter.serial_port = self._settings['SerialPort']
+
+        # Battery service filter — updated live when the GUI changes the setting
+        self._battery_service = self._settings['BatteryService']
+        self.logger.info(f"Monitoring battery service: {self._battery_service}")
+        self.logger.info(f"Using serial port: {self.nmea_transmitter.serial_port}")
+
         # Define what services and paths to monitor using DbusMonitor format
-        # The structure is: {'service_class': {'/path': {'code': None, 'whenToLog': 'always'}}}
         self.monitor_list = {
             'com.victronenergy.battery': {
                 '/Dc/0/Current': {'code': 'current', 'whenToLog': 'always'}
             }
         }
-
-        # Ignore the following service since we only want to monitor the 48v battery service connected to ttyUSB1
-        self.ignored_services = ['com.victronenergy.battery.ttyUSB0']
 
         # Pre-compute expected sensor keys to avoid rebuilding on every get_sensor_data() call
         self._expected_sensors = {
@@ -76,6 +92,9 @@ class Dbus2NmeaRelayService:
         # D-Bus monitor will be initialized later
         self.dbusMonitor = None
 
+        # Status service published to D-Bus so the GUI can display live state
+        self._dbus_service = None
+
         # Initialize control variables
         self.running = False
         self.last_relay_time = 0.0
@@ -88,10 +107,36 @@ class Dbus2NmeaRelayService:
         self.relay_thread = threading.Thread(target=self._relay_worker)
         self.relay_thread.daemon = True
 
+    def _init_dbus_status_service(self):
+        """Publish com.victronenergy.nmeatransmitter for GUI status display."""
+        self._dbus_service = VeDbusService(
+            'com.victronenergy.nmeatransmitter',
+            bus=dbus.SystemBus(),
+            register=False
+        )
+        self._dbus_service.add_path('/Connected',        0, writeable=False)
+        self._dbus_service.add_path('/BatteryConnected', 0, writeable=False)
+        self._dbus_service.add_path('/LastCurrent',      None, writeable=False)
+        self._dbus_service.register()
+
+    def _update_status(self, serial_connected=None, battery_connected=None, last_current=None):
+        """Update the D-Bus status paths. Pass None to leave a value unchanged."""
+        if self._dbus_service is None:
+            return
+        if serial_connected is not None:
+            self._dbus_service['/Connected'] = 1 if serial_connected else 0
+        if battery_connected is not None:
+            self._dbus_service['/BatteryConnected'] = 1 if battery_connected else 0
+        if last_current is not None:
+            self._dbus_service['/LastCurrent'] = last_current
+
     def start(self):
         """Initialize D-Bus monitor and start the relaying thread"""
         # Open the serial port once for persistent use
         self.nmea_transmitter.open()
+        self._update_status(serial_connected=self.nmea_transmitter._serial is not None)
+
+        self._init_dbus_status_service()
 
         try:
             # Initialize DbusMonitor with our monitor list and callbacks
@@ -101,7 +146,6 @@ class Dbus2NmeaRelayService:
                 deviceAddedCallback=self._on_device_added,
                 deviceRemovedCallback=self._on_device_removed,
                 namespace="com.victronenergy",
-                ignoreServices=self.ignored_services
             )
 
             # Initialize sensor data cache with current values
@@ -129,15 +173,15 @@ class Dbus2NmeaRelayService:
         with self.data_lock:
             current_time = time.time()
 
-            # Initialize all expected sensor keys using classfilter for efficiency
             for service_class, paths in self.monitor_list.items():
                 service_list = self.dbusMonitor.get_service_list(classfilter=service_class)
                 for path, config in paths.items():
                     sensor_key = config['code']
 
-                    # Try to get current value from any matching service
                     value = None
                     for service_name in service_list:
+                        if service_name != self._battery_service:
+                            continue
                         value = self.dbusMonitor.get_value(service_name, path)
                         if value is not None:
                             break
@@ -148,13 +192,17 @@ class Dbus2NmeaRelayService:
                     }
                     self.logger.debug(f"Initialized sensor {sensor_key} with value: {value}")
 
+        battery_connected = any(
+            info.get('value') is not None for info in self.sensor_data.values()
+        )
+        self._update_status(battery_connected=battery_connected)
+
         self._relay_event.set()
         self.logger.debug(f"Initialized sensor cache with {len(self.sensor_data)} sensors: {list(self.sensor_data.keys())}")
 
     def _on_device_added(self, service_name, device_instance):
         """Callback when a new device is added to the bus"""
         self.logger.info(f"Device added: {service_name} (instance: {device_instance})")
-        # Update our cache with values from the new device
         self._update_cache_from_service(service_name)
 
     def _on_device_removed(self, service_name, device_instance):
@@ -164,6 +212,9 @@ class Dbus2NmeaRelayService:
 
     def _clear_cache_for_service(self, service_name):
         """Clear cached sensor values that were provided by the given service."""
+        if service_name != self._battery_service:
+            return
+
         matching_service_class = next(
             (sc for sc in self.monitor_list if service_name.startswith(sc)), None
         )
@@ -176,14 +227,15 @@ class Dbus2NmeaRelayService:
                 sensor_key = config['code']
                 if sensor_key in self.sensor_data:
                     self.sensor_data[sensor_key]['value'] = None
+
+        self._update_status(battery_connected=False)
         self.logger.debug(f"Cleared cache for removed service {service_name}")
 
     def _update_cache_from_service(self, service_name):
         """Update cache with values from a specific service"""
-        if not self.dbusMonitor:
+        if not self.dbusMonitor or service_name != self._battery_service:
             return
 
-        # Check if this service matches any of our monitored service patterns
         matching_service_class = next(
             (sc for sc in self.monitor_list if service_name.startswith(sc)), None
         )
@@ -203,10 +255,18 @@ class Dbus2NmeaRelayService:
                         'value': value,
                         'timestamp': current_time
                     }
+
+        battery_connected = any(
+            info.get('value') is not None for info in self.sensor_data.values()
+        )
+        self._update_status(battery_connected=battery_connected)
         self._relay_event.set()
 
     def _on_value_changed(self, service_name, path, options, changes, device_instance):
         """Callback when a monitored value changes"""
+        if service_name != self._battery_service:
+            return
+
         if 'Value' not in changes:
             return
 
@@ -226,23 +286,29 @@ class Dbus2NmeaRelayService:
         self._relay_event.set()
         self.logger.debug(f"Value changed for {sensor_key}: {value}")
 
+    def _on_setting_changed(self, setting, old_value, new_value):
+        """Callback when a GUI-persisted setting changes."""
+        self.logger.info(f"Setting changed: {setting} = {new_value!r} (was {old_value!r})")
+        if setting == 'BatteryService':
+            self._battery_service = new_value
+            # Re-init cache to pick up values from the newly selected service
+            self._initialize_sensor_cache()
+        elif setting == 'SerialPort':
+            self.nmea_transmitter.set_port(new_value)
+            self._update_status(serial_connected=False)  # will reconnect on next send
+
     def get_sensor_data(self):
         """Get current sensor values from cache"""
-        timestamp = datetime.now().isoformat()
         with self.data_lock:
-            # Create data dictionary with current values
             data = {}
             for sensor_key, sensor_info in self.sensor_data.items():
                 value = sensor_info.get('value')
                 data[sensor_key] = value if value is not None else float('nan')
 
-            # Ensure all expected sensors are present using pre-computed set
             for sensor_key in self._expected_sensors:
                 if sensor_key not in data:
                     data[sensor_key] = float('nan')
 
-        # Add timestamp outside the lock (no shared state involved)
-        data['timestamp'] = timestamp
         return data
 
     def _relay_worker(self):
@@ -251,8 +317,6 @@ class Dbus2NmeaRelayService:
 
         while self.running:
             # Wait until data changes or the max relay interval elapses.
-            # This replaces the fixed-interval polling sleep, giving near-zero
-            # latency on data changes and a clean wakeup path for shutdown.
             remaining = self.max_relay_interval - (time.time() - self.last_relay_time)
             self._relay_event.wait(timeout=max(0, remaining))
 
@@ -290,8 +354,15 @@ class Dbus2NmeaRelayService:
                     value=current_value,
                     unit='N' # NMEA unit for speed in knots
                 )
+
+                serial_open = self.nmea_transmitter._serial is not None and self.nmea_transmitter._serial.is_open
+                self._update_status(
+                    serial_connected=serial_open,
+                    last_current=float(current_value)
+                )
             except Exception as e:
                 self.logger.error(f"Error sending NMEA sentence: {e}")
+                self._update_status(serial_connected=False)
 
             self.last_relay_time = current_time
 
