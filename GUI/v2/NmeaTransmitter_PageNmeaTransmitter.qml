@@ -11,21 +11,13 @@ Page {
             // ── Status (read-only) ──────────────────────────────────
             ListText {
                 text: qsTr("Serial port status")
-                secondaryText: {
-                    const v = serialConnected.value
-                    if (v === undefined || v === null) return "--"
-                    return v ? qsTr("Connected") : qsTr("Disconnected")
-                }
-                DataItem { id: serialConnected; uid: "dbus/com.victronenergy.nmeatransmitter/Connected" }
+                dataItem.uid: "dbus/com.victronenergy.nmeatransmitter/Connected"
+                secondaryText: dataItem.valid ? (dataItem.value ? qsTr("Connected") : qsTr("Disconnected")) : "--"
             }
             ListText {
                 text: qsTr("Battery service status")
-                secondaryText: {
-                    const v = batteryConnected.value
-                    if (v === undefined || v === null) return "--"
-                    return v ? qsTr("Connected") : qsTr("Disconnected")
-                }
-                DataItem { id: batteryConnected; uid: "dbus/com.victronenergy.nmeatransmitter/BatteryConnected" }
+                dataItem.uid: "dbus/com.victronenergy.nmeatransmitter/BatteryConnected"
+                secondaryText: dataItem.valid ? (dataItem.value ? qsTr("Connected") : qsTr("Disconnected")) : "--"
             }
             ListQuantity {
                 text: qsTr("Last current")
@@ -38,14 +30,14 @@ Page {
             ListTextField {
                 text: qsTr("Serial port")
                 dataItem.uid: "dbus/com.victronenergy.settings/Settings/NmeaTransmitter/SerialPort"
-                maximumLength: 32
-                userHasWriteAccess: VenusOS.User_AccessType_User
+                textField.maximumLength: 32
+                writeAccessLevel: VenusOS.User_AccessType_User
             }
             ListTextField {
                 text: qsTr("Battery D-Bus service")
                 dataItem.uid: "dbus/com.victronenergy.settings/Settings/NmeaTransmitter/BatteryService"
-                maximumLength: 64
-                userHasWriteAccess: VenusOS.User_AccessType_User
+                textField.maximumLength: 64
+                writeAccessLevel: VenusOS.User_AccessType_User
             }
         }
     }
