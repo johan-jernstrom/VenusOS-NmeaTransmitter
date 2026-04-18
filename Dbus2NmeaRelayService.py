@@ -261,6 +261,10 @@ class Dbus2NmeaRelayService:
 
             current_time = time.time()
 
+            # Consume the event before sleeping so any new set() during the
+            # rate-limit sleep re-arms it and is not missed.
+            self._relay_event.clear()
+
             # Rate-limit: if the event fired very quickly, sleep the remainder
             # of the minimum interval before sending.
             elapsed = current_time - self.last_relay_time
@@ -269,10 +273,6 @@ class Dbus2NmeaRelayService:
                 if not self.running:
                     break
                 current_time = time.time()
-
-            # Consume the event (safe: a new set() after this point will re-arm
-            # the event so the next change is not missed).
-            self._relay_event.clear()
 
             data_to_relay = self.get_sensor_data()
 
@@ -355,14 +355,14 @@ if __name__ == "__main__":
     relayService = None
 
     try:
+        # Must be set before any D-Bus connections are made (including DbusMonitor init)
+        DBusGMainLoop(set_as_default=True)
+
         relayService = Dbus2NmeaRelayService(
             min_relay_interval=args.min_interval,
             max_relay_interval=args.max_interval,
             log_level=log_level
         )
-
-        # Have a mainloop, so we can send/receive asynchronous calls to and from dbus
-        DBusGMainLoop(set_as_default=True)
         mainloop = GLib.MainLoop()
 
         # Initialize DBusMonitor and start relaying
